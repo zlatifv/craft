@@ -61,6 +61,9 @@ db.serialize(() => {
   )`);
 });
 
+// Email sender — set RESEND_FROM in Render env vars (e.g. verify@craft.app)
+const FROM_EMAIL = process.env.RESEND_FROM || 'onboarding@resend.dev';
+
 async function sendVerificationEmail(email, token, origin) {
   const verifyUrl = `${origin}/verify.html?token=${token}`;
   
@@ -73,7 +76,7 @@ async function sendVerificationEmail(email, token, origin) {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          from: 'Craft <onboarding@resend.dev>',
+          from: `Craft <${FROM_EMAIL}>`,
           to: email,
           subject: 'Verify your Craft account',
           html: `<p>Click to verify your email:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p>`
@@ -89,6 +92,7 @@ async function sendVerificationEmail(email, token, origin) {
   }
   
   console.log('\n--- VERIFICATION EMAIL ---');
+  console.log('From:', FROM_EMAIL);
   console.log('To:', email);
   console.log('Link:', verifyUrl);
   console.log('-------------------------\n');
