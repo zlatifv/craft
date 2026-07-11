@@ -73,7 +73,7 @@ async function sendVerificationEmail(email, token, origin) {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          from: 'Craft <verify@craft.is-a.dev>',
+          from: 'Craft <onboarding@resend.dev>',
           to: email,
           subject: 'Verify your Craft account',
           html: `<p>Click to verify your email:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p>`
