@@ -22,4 +22,203 @@
     .badge-premium { background: #dcfce7; color: #166534; }
     .badge-free { background: #f3f4f6; color: #374151; }
     .ref-box { background: #f9fafb; padding: 12px; border-radius: 8px; font-family: monospace; font-size: 14px; word-break: break-all; cursor: pointer; border: 1px solid #e5e7eb; }
-    .stat { font-size: 24px; font-weight:
+    .stat { font-size: 24px; font-weight: 700; }
+    .label { font-size: 14px; color: #666; }
+    .alert { padding: 12px; border-radius: 8px; margin-bottom: 12px; }
+    .alert-success { background: #dcfce7; color: #166534; }
+    .alert-error { background: #fee2e2; color: #991b1b; }
+    .divider { height: 1px; background: #e5e5e5; margin: 16px 0; }
+  </style>
+</head>
+<body>
+  <h1>Craft</h1>
+  <p class="subtitle">One workspace. No clutter.</p>
+  
+  <div id="alerts"></div>
+  
+  <div id="auth">
+    <div class="card">
+      <h3>Create Account</h3>
+      <input type="email" id="regEmail" placeholder="Email">
+      <input type="password" id="regPass" placeholder="Password">
+      <input type="text" id="regCode" placeholder="Referral code (optional)">
+      <button onclick="register()">Get Started</button>
+    </div>
+    
+    <div class="card">
+      <h3>Sign In</h3>
+      <input type="email" id="logEmail" placeholder="Email">
+      <input type="password" id="logPass" placeholder="Password">
+      <button onclick="login()" class="secondary">Sign In</button>
+    </div>
+  </div>
+  
+  <div id="app" class="hidden">
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3 style="margin:0;">Your Account</h3>
+        <span id="planBadge" class="badge badge-free">Free</span>
+      </div>
+      <div class="divider"></div>
+      <p><strong>Email:</strong> <span id="userEmail"></span></p>
+      <p id="planText"></p>
+    </div>
+    
+    <div class="card">
+      <h3>Refer Friends</h3>
+      <p style="font-size:14px; color:#666;">Share your link. They get 8 days free. You get credit.</p>
+      <div class="ref-box" id="refLink" onclick="copyLink()"></div>
+      <p style="font-size:12px; color:#666; margin-top:6px;">Click to copy</p>
+      
+      <div style="display:flex; gap:16px; margin-top:16px;">
+        <div>
+          <div class="stat" id="refCount">0</div>
+          <div class="label">Friends joined</div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="card" id="redeemCard">
+      <h3>Have a Code?</h3>
+      <input type="text" id="redeemInput" placeholder="Enter referral code">
+      <button onclick="redeem()">Claim 8 Days Free</button>
+    </div>
+    
+    <button onclick="logout()" class="secondary" style="margin-top:8px;">Sign Out</button>
+  </div>
+
+  <script>
+    const API = '/api';
+    let token = localStorage.getItem('token');
+    
+    if (token) loadUser();
+    
+    const urlParams = new URLSearchParams(window.location.search);
+    const ref = urlParams.get('ref');
+    if (ref) document.getElementById('regCode').value = ref;
+    
+    function showAlert(msg, type) {
+      const div = document.getElementById('alerts');
+      div.innerHTML = `<div class="alert alert-${type}">${msg}</div>`;
+      setTimeout(() => div.innerHTML = '', 4000);
+    }
+    
+    async function register() {
+      const email = document.getElementById('regEmail').value;
+      const password = document.getElementById('regPass').value;
+      const referralCode = document.getElementById('regCode').value || undefined;
+      
+      const res = await fetch(`${API}/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, referralCode })
+      });
+      const data = await res.json();
+      if (data.token) {
+        token = data.token;
+        localStorage.setItem('token', token);
+        showAlert('Account created!', 'success');
+        loadUser();
+      } else {
+        showAlert(data.error, 'error');
+      }
+    }
+    
+    async function login() {
+      const email = document.getElementById('logEmail').value;
+      const password = document.getElementById('logPass').value;
+      
+      const res = await fetch(`${API}/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      });
+      const data = await res.json();
+      if (data.token) {
+        token = data.token;
+        localStorage.setItem('token', token);
+        showAlert('Signed in!', 'success');
+        loadUser();
+      } else {
+        showAlert(data.error, 'error');
+      }
+    }
+    
+    async function loadUser() {
+      const res = await fetch(`${API}/me`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const user = await res.json();
+      if (user.error) { logout(); return; }
+      
+      document.getElementById('auth').classList.add('hidden');
+      document.getElementById('app').classList.remove('hidden');
+      document.getElementById('userEmail').textContent = user.email;
+      
+      const badge = document.getElementById('planBadge');
+      const planText = document.getElementById('planText');
+      
+      if (user.isPremium) {
+        badge.className = 'badge badge-premium';
+        badge.textContent = 'Premium';
+        planText.innerHTML = `<span class="premium">${user.daysLeft} days</span> of free premium remaining.`;
+      } else {
+        badge.className = 'badge badge-free';
+        badge.textContent = 'Free';
+        planText.innerHTML = `<span class="free">Free plan</span> — <a href="#" onclick="document.getElementById('redeemInput').focus(); return false;" style="color:#000;">use a referral code</a> for 8 days premium.`;
+      }
+      
+      const link = `${window.location.origin}/?ref=${user.referral_code}`;
+      document.getElementById('refLink').textContent = link;
+      
+      if (user.referred_by) {
+        document.getElementById('redeemCard').classList.add('hidden');
+      } else {
+        document.getElementById('redeemCard').classList.remove('hidden');
+      }
+      
+      loadStats();
+    }
+    
+    async function loadStats() {
+      const res = await fetch(`${API}/referral/stats`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      document.getElementById('refCount').textContent = data.count;
+    }
+    
+    async function redeem() {
+      const code = document.getElementById('redeemInput').value.trim();
+      if (!code) return;
+      
+      const res = await fetch(`${API}/referral/redeem`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showAlert('You unlocked 8 days of premium!', 'success');
+        loadUser();
+      } else {
+        showAlert(data.error, 'error');
+      }
+    }
+    
+    function copyLink() {
+      const link = document.getElementById('refLink').textContent;
+      navigator.clipboard.writeText(link);
+      showAlert('Link copied!', 'success');
+    }
+    
+    function logout() {
+      token = null;
+      localStorage.removeItem('token');
+      document.getElementById('auth').classList.remove('hidden');
+      document.getElementById('app').classList.add('hidden');
+      document.getElementById('alerts').innerHTML = '';
+    }
+  </script>
+</body>
+</html>
