@@ -8,12 +8,10 @@ const crypto = require('crypto');
 
 const app = express();
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
 
-// Database setup
-const db = new sqlite3.Database('./data.db');
+const db = new sqlite3.Database(path.join(__dirname, 'data.db'));
 
-// Promisify helper
 function dbRun(sql, params = []) {
   return new Promise((resolve, reject) => {
     db.run(sql, params, function(err) {
@@ -41,7 +39,6 @@ function dbAll(sql, params = []) {
   });
 }
 
-// Initialize tables
 db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,6 +47,8 @@ db.serialize(() => {
     referral_code TEXT UNIQUE NOT NULL,
     premium_expires INTEGER DEFAULT 0,
     referred_by INTEGER,
+    email_verified INTEGER DEFAULT 0,
+    verification_token TEXT,
     created_at INTEGER DEFAULT (strftime('%s', 'now'))
   )`);
 
@@ -62,7 +61,40 @@ db.serialize(() => {
   )`);
 });
 
-// Auth middleware
+async function sendVerificationEmail(email, token, origin) {
+  const verifyUrl = `${origin}/verify.html?token=${token}`;
+  
+  if (process.env.RESEND_API_KEY) {
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          from: 'Craft <verify@craft.is-a.dev>',
+          to: email,
+          subject: 'Verify your Craft account',
+          html: `<p>Click to verify your email:</p><p><a href="${verifyUrl}">${verifyUrl}</a></p>`
+        })
+      });
+      const data = await res.json();
+      console.log('Email sent:', data.id || data);
+      return true;
+    } catch (err) {
+      console.error('Email failed:', err);
+      return false;
+    }
+  }
+  
+  console.log('\n--- VERIFICATION EMAIL ---');
+  console.log('To:', email);
+  console.log('Link:', verifyUrl);
+  console.log('-------------------------\n');
+  return true;
+}
+
 const authenticate = (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'No token' });
@@ -75,8 +107,8 @@ const authenticate = (req, res, next) => {
 };
 
 const generateCode = () => crypto.randomBytes(4).toString('hex').toUpperCase();
+const generateToken = () => crypto.randomBytes(32).toString('hex');
 
-// Register
 app.post('/api/register', async (req, res) => {
   try {
     const { email, password, referralCode } = req.body;
@@ -84,10 +116,11 @@ app.post('/api/register', async (req, res) => {
     
     const hash = await bcrypt.hash(password, 10);
     const code = generateCode();
+    const verifyToken = generateToken();
     
     const result = await dbRun(
-      'INSERT INTO users (email, password, referral_code) VALUES (?, ?, ?)',
-      [email, hash, code]
+      'INSERT INTO users (email, password, referral_code, verification_token) VALUES (?, ?, ?, ?)',
+      [email, hash, code, verifyToken]
     );
     const userId = result.lastID;
     
@@ -112,8 +145,15 @@ app.post('/api/register', async (req, res) => {
       }
     }
     
-    const token = jwt.sign({ id: userId, email }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '7d' });
-    res.json({ token, referralCode: code, premiumExpires });
+    const origin = req.headers.origin || `https://${req.headers.host}`;
+    await sendVerificationEmail(email, verifyToken, origin);
+    
+    res.json({ 
+      success: true, 
+      message: 'Check your email to verify your account',
+      referralCode: code,
+      premiumExpires 
+    });
   } catch (err) {
     if (err.message && err.message.includes('UNIQUE constraint failed')) {
       return res.status(400).json({ error: 'Email already exists' });
@@ -123,7 +163,42 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// Login
+app.get('/api/verify/:token', async (req, res) => {
+  try {
+    const user = await dbGet('SELECT * FROM users WHERE verification_token = ?', [req.params.token]);
+    if (!user) return res.status(400).json({ error: 'Invalid or expired token' });
+    
+    await dbRun(
+      'UPDATE users SET email_verified = 1, verification_token = NULL WHERE id = ?',
+      [user.id]
+    );
+    
+    res.json({ success: true, message: 'Email verified! You can now log in.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/resend-verification', async (req, res) => {
+  try {
+    const { email } = req.body;
+    const user = await dbGet('SELECT * FROM users WHERE email = ? AND email_verified = 0', [email]);
+    if (!user) return res.status(400).json({ error: 'Account not found or already verified' });
+    
+    const newToken = generateToken();
+    await dbRun('UPDATE users SET verification_token = ? WHERE id = ?', [newToken, user.id]);
+    
+    const origin = req.headers.origin || `https://${req.headers.host}`;
+    await sendVerificationEmail(email, newToken, origin);
+    
+    res.json({ success: true, message: 'Verification email resent' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -133,6 +208,14 @@ app.post('/api/login', async (req, res) => {
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(400).json({ error: 'Invalid credentials' });
     
+    if (!user.email_verified) {
+      return res.status(403).json({ 
+        error: 'Email not verified', 
+        needsVerification: true,
+        email: user.email 
+      });
+    }
+    
     const token = jwt.sign({ id: user.id, email }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '7d' });
     res.json({ token, referralCode: user.referral_code, premiumExpires: user.premium_expires });
   } catch (err) {
@@ -141,10 +224,9 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Get current user
 app.get('/api/me', authenticate, async (req, res) => {
   try {
-    const user = await dbGet('SELECT id, email, referral_code, premium_expires, referred_by FROM users WHERE id = ?', [req.user.id]);
+    const user = await dbGet('SELECT id, email, referral_code, premium_expires, referred_by, email_verified FROM users WHERE id = ?', [req.user.id]);
     const now = Math.floor(Date.now() / 1000);
     const isPremium = user.premium_expires > now;
     const daysLeft = isPremium ? Math.ceil((user.premium_expires - now) / 86400) : 0;
@@ -161,7 +243,6 @@ app.get('/api/me', authenticate, async (req, res) => {
   }
 });
 
-// Redeem referral code
 app.post('/api/referral/redeem', authenticate, async (req, res) => {
   try {
     const { code } = req.body;
@@ -196,7 +277,6 @@ app.post('/api/referral/redeem', authenticate, async (req, res) => {
   }
 });
 
-// Referral stats
 app.get('/api/referral/stats', authenticate, async (req, res) => {
   try {
     const redemptions = await dbAll(`
@@ -214,8 +294,16 @@ app.get('/api/referral/stats', authenticate, async (req, res) => {
   }
 });
 
-// Health check
 app.get('/api/health', (req, res) => res.json({ ok: true }));
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+app.get('*', (req, res) => {
+  if (req.path.startsWith('/api')) return res.status(404).json({ error: 'Not found' });
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
