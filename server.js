@@ -7,7 +7,6 @@ const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
 const WebSocket = require('ws');
-const Y = require('yjs');
 
 const app = express();
 app.use(express.json());
@@ -92,11 +91,11 @@ db.serialize(() => {
   )`);
 });
 
-// Yjs document store for real-time collaboration
 const docs = new Map();
 
 function getYDoc(pageId) {
   if (!docs.has(pageId)) {
+    const Y = require('yjs');
     const ydoc = new Y.Doc();
     docs.set(pageId, ydoc);
   }
@@ -106,16 +105,15 @@ function getYDoc(pageId) {
 wss.on('connection', (ws, req) => {
   const pageId = new URL(req.url, 'http://localhost').searchParams.get('page');
   if (!pageId) return ws.close();
-
+  
   const ydoc = getYDoc(pageId);
-  const awareness = new Y.Awareness(ydoc);
-
+  
   ws.on('message', (message) => {
     try {
       const data = JSON.parse(message);
       if (data.type === 'update') {
+        const Y = require('yjs');
         Y.applyUpdate(ydoc, new Uint8Array(data.update));
-        // Broadcast to other clients
         wss.clients.forEach(client => {
           if (client !== ws && client.readyState === WebSocket.OPEN) {
             client.send(JSON.stringify({ type: 'update', update: data.update }));
@@ -124,8 +122,8 @@ wss.on('connection', (ws, req) => {
       }
     } catch (e) {}
   });
-
-  // Send current state
+  
+  const Y = require('yjs');
   const state = Y.encodeStateAsUpdate(ydoc);
   ws.send(JSON.stringify({ type: 'init', update: Array.from(state) }));
 });
@@ -143,54 +141,51 @@ const authenticate = (req, res, next) => {
 
 const generateCode = () => crypto.randomBytes(4).toString('hex').toUpperCase();
 
-// Auth routes
 app.post('/api/register', async (req, res) => {
   try {
     const { email, password, referralCode } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
-
+    
     const hash = await bcrypt.hash(password, 10);
     const code = generateCode();
-
+    
     const result = await dbRun(
       'INSERT INTO users (email, password, referral_code) VALUES (?, ?, ?)',
       [email, hash, code]
     );
     const userId = result.lastID;
-
+    
     let premiumExpires = 0;
-
+    
     if (referralCode) {
       const referrer = await dbGet('SELECT * FROM users WHERE referral_code = ?', [referralCode]);
       if (referrer && referrer.id !== userId) {
         const now = Math.floor(Date.now() / 1000);
         const eightDays = 8 * 24 * 60 * 60;
         premiumExpires = now + eightDays;
-
+        
         await dbRun(
           'UPDATE users SET premium_expires = ?, referred_by = ? WHERE id = ?',
           [premiumExpires, referrer.id, userId]
         );
-
+        
         await dbRun(
           'INSERT INTO redemptions (code, referrer_id, redeemed_by) VALUES (?, ?, ?)',
           [referralCode, referrer.id, userId]
         );
       }
     }
-
-    // Create default workspace
+    
     const wsResult = await dbRun(
       'INSERT INTO workspaces (name, owner_id) VALUES (?, ?)',
       ['My Workspace', userId]
     );
-
-    // Create welcome page
+    
     await dbRun(
       'INSERT INTO pages (workspace_id, title, icon) VALUES (?, ?, ?)',
       [wsResult.lastID, 'Getting Started', '👋']
     );
-
+    
     const token = jwt.sign({ id: userId, email }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '7d' });
     res.json({ token, referralCode: code, premiumExpires });
   } catch (err) {
@@ -207,10 +202,10 @@ app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
     const user = await dbGet('SELECT * FROM users WHERE email = ?', [email]);
     if (!user) return res.status(400).json({ error: 'Invalid credentials' });
-
+    
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(400).json({ error: 'Invalid credentials' });
-
+    
     const token = jwt.sign({ id: user.id, email }, process.env.JWT_SECRET || 'dev-secret-change-me', { expiresIn: '7d' });
     res.json({ token, referralCode: user.referral_code, premiumExpires: user.premium_expires });
   } catch (err) {
@@ -225,7 +220,7 @@ app.get('/api/me', authenticate, async (req, res) => {
     const now = Math.floor(Date.now() / 1000);
     const isPremium = user.premium_expires > now;
     const daysLeft = isPremium ? Math.ceil((user.premium_expires - now) / 86400) : 0;
-
+    
     res.json({ ...user, isPremium, daysLeft, premiumExpires: user.premium_expires });
   } catch (err) {
     console.error(err);
@@ -233,7 +228,6 @@ app.get('/api/me', authenticate, async (req, res) => {
   }
 });
 
-// Workspace routes
 app.get('/api/workspaces', authenticate, async (req, res) => {
   try {
     const workspaces = await dbAll('SELECT * FROM workspaces WHERE owner_id = ?', [req.user.id]);
@@ -244,7 +238,6 @@ app.get('/api/workspaces', authenticate, async (req, res) => {
   }
 });
 
-// Page routes
 app.get('/api/pages', authenticate, async (req, res) => {
   try {
     const { workspace_id } = req.query;
@@ -276,9 +269,10 @@ app.post('/api/pages', authenticate, async (req, res) => {
 app.patch('/api/pages/:id', authenticate, async (req, res) => {
   try {
     const { title, icon } = req.body;
+    const now = Math.floor(Date.now() / 1000);
     await dbRun(
-      'UPDATE pages SET title = ?, icon = ?, updated_at = strftime('%s', 'now') WHERE id = ?',
-      [title, icon, req.params.id]
+      'UPDATE pages SET title = ?, icon = ?, updated_at = ? WHERE id = ?',
+      [title, icon, now, req.params.id]
     );
     res.json({ success: true });
   } catch (err) {
@@ -298,7 +292,6 @@ app.delete('/api/pages/:id', authenticate, async (req, res) => {
   }
 });
 
-// Block routes
 app.get('/api/blocks/:pageId', authenticate, async (req, res) => {
   try {
     const blocks = await dbAll(
@@ -350,34 +343,33 @@ app.delete('/api/blocks/:id', authenticate, async (req, res) => {
   }
 });
 
-// Referral routes
 app.post('/api/referral/redeem', authenticate, async (req, res) => {
   try {
     const { code } = req.body;
     const user = await dbGet('SELECT * FROM users WHERE id = ?', [req.user.id]);
-
+    
     if (user.referred_by) {
       return res.status(400).json({ error: 'You have already used a referral code' });
     }
-
+    
     const referrer = await dbGet('SELECT * FROM users WHERE referral_code = ?', [code]);
     if (!referrer) return res.status(400).json({ error: 'Invalid code' });
     if (referrer.id === user.id) return res.status(400).json({ error: 'Cannot use your own code' });
-
+    
     const now = Math.floor(Date.now() / 1000);
     const eightDays = 8 * 24 * 60 * 60;
     const premiumExpires = now + eightDays;
-
+    
     await dbRun(
       'UPDATE users SET premium_expires = ?, referred_by = ? WHERE id = ?',
       [premiumExpires, referrer.id, user.id]
     );
-
+    
     await dbRun(
       'INSERT INTO redemptions (code, referrer_id, redeemed_by) VALUES (?, ?, ?)',
       [code, referrer.id, user.id]
     );
-
+    
     res.json({ success: true, premiumExpires, daysLeft: 8 });
   } catch (err) {
     console.error(err);
@@ -394,7 +386,7 @@ app.get('/api/referral/stats', authenticate, async (req, res) => {
       WHERE r.referrer_id = ?
       ORDER BY r.redeemed_at DESC
     `, [req.user.id]);
-
+    
     res.json({ count: redemptions.length, redemptions });
   } catch (err) {
     console.error(err);
